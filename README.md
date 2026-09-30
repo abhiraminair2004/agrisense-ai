@@ -655,3 +655,131 @@ All models run on **CPU** by default (`DEVICE=cpu` in `.env`). Set `DEVICE=cuda`
 | **CPU inference speed** | Loading all models takes 20–60 s at startup. Per-request inference takes 3–15 s on CPU depending on which branch runs (YOLO at `imgsz=1280` is the slowest). A GPU reduces both figures by ~5×. |
 | **No streaming / progress** | The UI shows a spinner but does not stream intermediate results. The user must wait for the full pipeline to complete before seeing any output. |
 | **Single image only** | There is no batch upload mode. Each request processes exactly one image. |
+
+---
+
+## 12. DevOps and deployment operations
+
+### Architecture
+
+The application follows a three-tier runtime model with separate responsibilities:
+
+- Client: React + Vite frontend served by Nginx.
+- Server: Express API gateway that validates image uploads and proxies requests to the model service.
+- Model service: FastAPI application with the ML inference pipeline.
+
+The detailed architecture notes live in [docs/architecture.md](docs/architecture.md).
+
+### Docker
+
+The local Docker workflow is defined in [docker-compose.yml](docker-compose.yml).
+
+```bash
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+### Docker Compose
+
+Use Compose for local development and validation tests:
+
+```bash
+docker compose build model-service
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+### Kubernetes
+
+The required manifests live in [k8s](k8s):
+
+- [k8s/client-deployment.yaml](k8s/client-deployment.yaml)
+- [k8s/client-service.yaml](k8s/client-service.yaml)
+- [k8s/server-deployment.yaml](k8s/server-deployment.yaml)
+- [k8s/server-service.yaml](k8s/server-service.yaml)
+- [k8s/model-service-deployment.yaml](k8s/model-service-deployment.yaml)
+- [k8s/model-service-service.yaml](k8s/model-service-service.yaml)
+
+The server is configured to call the model service with the in-cluster DNS URL `http://model-service:8000` instead of `localhost`.
+
+```bash
+kubectl apply -f k8s/client-deployment.yaml
+kubectl apply -f k8s/client-service.yaml
+kubectl apply -f k8s/server-deployment.yaml
+kubectl apply -f k8s/server-service.yaml
+kubectl apply -f k8s/model-service-deployment.yaml
+kubectl apply -f k8s/model-service-service.yaml
+```
+
+### Rolling update
+
+Rolling updates are configured with `RollingUpdate` strategies and immutable image tags such as `v1` and `v2`.
+
+```bash
+kubectl rollout status deployment/client
+kubectl rollout status deployment/server
+kubectl rollout status deployment/model-service
+kubectl rollout history deployment/server
+kubectl get pods
+```
+
+### Rollback
+
+Rollback is performed via revision history and undo commands.
+
+```bash
+kubectl rollout history deployment/server
+kubectl rollout undo deployment/server
+kubectl rollout status deployment/server
+kubectl get pods
+```
+
+### GitHub Actions
+
+The CI/CD workflow is defined in [.github/workflows/ci-cd.yml](.github/workflows/ci-cd.yml). It:
+
+- runs on pull requests to `main`
+- runs on pushes to `main`
+- builds and tests the frontend and server
+- builds the deployable Docker images
+- logs in to Docker Hub with repository secrets
+- pushes immutable image tags based on `github.sha`
+- avoids any fake Kubernetes deployment claim
+
+### Required GitHub Secrets
+
+Set the following repository secrets before enabling container publishing:
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN`
+
+Do not store credentials, API keys, or private keys in the repository.
+
+### Local setup
+
+```bash
+cd client && npm install && npm run build
+cd ../server && npm install
+cd ../model-service && pip install -r requirements.txt
+cd ..
+docker compose build
+docker compose up -d
+```
+
+### Troubleshooting
+
+- If the server cannot reach the model service, confirm the server environment uses `PYTHON_SERVICE_URL=http://model-service:8000` and not `localhost`.
+- If Compose shows startup races, wait for the model service to finish loading the ML weights before sending the first upload request.
+- If the client does not render, confirm the frontend service is running on port 3000.
+- If Kubernetes pods are not ready, check the health endpoints: `/health` for the server and model service, and `/` for the client.
+
+### Team responsibilities
+
+- Frontend: maintain the React client, upload form UX, and result rendering.
+- Server: maintain the Express gateway, request validation, and upstream integration.
+- Model service: maintain the FastAPI service, model lifecycle, weights, and inference pipeline.
+- DevOps: maintain Docker/Compose, Kubernetes manifests, CI/CD, release tagging, and environment validation.
+
+Additional deployment documentation is available in [docs/deployment.md](docs/deployment.md), and the screenshot validation checklist is in [docs/screenshot-checklist.md](docs/screenshot-checklist.md).
